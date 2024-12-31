@@ -1,7 +1,6 @@
 package mapper_test
 
 import (
-	"fmt"
 	"testing"
 
 	mapper "github.com/uttom-akash/lwmap"
@@ -23,7 +22,8 @@ type User struct {
 	Name string
 	Age  int
 	Gender
-	Address *Address
+	Address []Address
+	PrimaryAddress *Address
 }
 
 type AddressDTO struct {
@@ -34,7 +34,8 @@ type UserDTO struct {
 	Name    string
 	UserAge int
 	Gender  uint64
-	Address *AddressDTO
+	Address []AddressDTO
+	PrimaryAddress AddressDTO
 }
 
 func TestMapper(t *testing.T) {
@@ -43,8 +44,16 @@ func TestMapper(t *testing.T) {
 		Name:   "World",
 		Age:    30,
 		Gender: Male,
-		Address: &Address{
-			Street: "Hello",
+		Address: []Address{
+			{
+				Street: "Hello",
+			},
+			{
+				Street: "World",
+			},
+		},
+		PrimaryAddress: &Address{
+			Street: "Stuttgart",
 		},
 	}
 
@@ -57,10 +66,10 @@ func TestMapper(t *testing.T) {
 	})
 
 	got := ""
-	target, err := mapper.Map[UserDTO](user, config)
+	target, err := mapper.Map[[]UserDTO]([]User{user}, config)
 	want := "Hello, World!"
 
-	fmt.Println(target)
+	t.Error(target)
 
 	if err != nil {
 		t.Errorf("got %q want %q", got, want)

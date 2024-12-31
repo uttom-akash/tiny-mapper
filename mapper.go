@@ -2,7 +2,6 @@ package mapper
 
 import (
 	"errors"
-	"fmt"
 	"reflect"
 )
 
@@ -16,112 +15,132 @@ func NewConfiguration() *Configuration {
 	}
 }
 
-func Add[SourceType interface{}, TargetType interface{}](config *Configuration, mp map[string]func(src SourceType) any) error {
+func Add[SourceType interface{}, TargetType interface{}](config *Configuration, stronglyTypedMap map[string]func(src SourceType) any) error {
 
 	var TargetTypeObj TargetType
 	var SourceTypeObj SourceType
-	target := reflect.TypeOf(TargetTypeObj).Name()
-	source := reflect.TypeOf(SourceTypeObj).Name()
+	targetType := reflect.TypeOf(TargetTypeObj).Name()
+	sourceType := reflect.TypeOf(SourceTypeObj).Name()
 
-	mp1 := make(map[string]func(src interface{}) interface{})
+	genericMap := make(map[string]func(src interface{}) interface{})
 
-	for k, v := range mp {
-		mp1[k] = func(src interface{}) interface{} {
-			return v(src.(SourceType))
+	for key, mapFunc := range stronglyTypedMap {
+		genericMap[key] = func(src interface{}) interface{} {
+			return mapFunc(src.(SourceType))
 		}
 	}
 
-	config.store[source+" | "+target] = mp1
+	key:= createKey(sourceType, targetType)
+
+	config.store[key] = genericMap
 	return nil
 }
 
 func Map[TargetType interface{}](src interface{}, config *Configuration) (TargetType, error) {
 
-	var target TargetType
+	var dummyTarget TargetType
 
-	mp := config.store[reflect.TypeOf(src).Name()+" | "+reflect.TypeOf(target).Name()]
-
-	target1, err := mapp(reflect.TypeOf(target), src, mp)
+	target, err := internal_map(reflect.TypeOf(dummyTarget), src, config)
 
 	if err != nil {
-		return target, err
+		return target.Interface().(TargetType), err
 	}
 
-	return target1.(TargetType), nil
+	return target.Interface().(TargetType), nil
 }
 
-func mapp(targetType reflect.Type, src interface{}, mp map[string]func(src interface{}) interface{}) (interface{}, error) {
+func internal_map(targetType reflect.Type, source interface{}, config *Configuration) (reflect.Value, error) {
 
-	givenTargetType := targetType
+	srcReflectValue := reflect.ValueOf(source)
 
-	srcValueObj := reflect.ValueOf(src)
-
-	if srcValueObj.Kind() == reflect.Ptr {
-		if srcValueObj.IsNil() {
-			return nil, nil
+	if srcReflectValue.Kind() == reflect.Ptr {
+		if srcReflectValue.IsNil() {
+			return reflect.Value{}, nil
 		}
-		srcValueObj = srcValueObj.Elem()
-	}
+		srcReflectValue = srcReflectValue.Elem()
 
-	// srcTypeObj := srcValueObj.Type()
+		return internal_map(targetType, srcReflectValue.Interface(), config)
+	}
 
 	if targetType.Kind() == reflect.Ptr {
 		targetType = targetType.Elem()
-	}
 
-	targetObject := reflect.New(targetType).Elem()
+		target, err := internal_map(targetType, srcReflectValue.Interface(), config)
 
-	if srcValueObj.Kind() != reflect.Struct {
-		return targetObject.Interface(), errors.New("src must be a struct")
-	}
-
-	if targetObject.Kind() != reflect.Struct {
-		return targetObject.Interface(), errors.New("target type must be a struct")
-	}
-
-	for i := 0; i < targetObject.NumField(); i++ {
-
-		targetField := targetObject.Field(i)
-		targetFieldName := targetType.Field(i).Name
-
-		if !targetField.IsValid() || !targetField.CanSet() {
-			continue
+		if err != nil {
+			return target, err
 		}
 
-		if v, ok := mp[targetFieldName]; ok {
-			targetField.Set(reflect.ValueOf(v(src)))
-			continue
+		return target.Addr(), nil
+	}
+
+	if srcReflectValue.Kind() == reflect.Slice {
+
+		targetElementType := targetType.Elem()
+
+		targetSlice := reflect.MakeSlice(reflect.SliceOf(targetElementType), srcReflectValue.Len(), srcReflectValue.Len())
+
+		for i := 0; i < srcReflectValue.Len(); i++ {
+
+			target, err := internal_map(targetElementType, srcReflectValue.Index(i).Interface(), config)
+
+			if err != nil {
+				return reflect.Zero(targetElementType), err
+			}
+			targetSlice.Index(i).Set(target)
 		}
 
-		sourceField := srcValueObj.FieldByName(targetFieldName)
+		return targetSlice, nil
+	}
 
-		if !sourceField.IsValid() {
-			continue
-		}
+	if srcReflectValue.Kind() == reflect.Struct {
 
-		if sourceField.Kind() == reflect.Ptr {
-			if sourceField.IsNil() {
+		targetReflectedValue := reflect.New(targetType).Elem()
+
+		key := createKey(srcReflectValue.Type().Name(), targetType.Name())
+
+		mp := config.store[key]
+
+		for index := 0; index < targetReflectedValue.NumField(); index++ {
+
+			targetField := targetReflectedValue.Field(index)
+			targetFieldName := targetType.Field(index).Name
+
+			if !targetField.IsValid() || !targetField.CanSet() {
 				continue
 			}
-			sourceField = sourceField.Elem()
+
+			if customMapFunc, ok := mp[targetFieldName]; ok {
+				targetField.Set(reflect.ValueOf(customMapFunc(source)))
+				continue
+			}
+
+			sourceField := srcReflectValue.FieldByName(targetFieldName)
+
+			if !sourceField.IsValid() {
+				continue
+			}
+
+			mappedField, err := internal_map(targetField.Type(), srcReflectValue.FieldByName(targetFieldName).Interface(), config)
+			
+			if err != nil {
+				return reflect.Value{}, err	
+			}
+
+			targetField.Set(mappedField)
 		}
 
-		if sourceField.Kind() == reflect.Struct {
-			nestedObjectType := targetField.Type()
-			nestedObject, _ := mapp(nestedObjectType, srcValueObj.FieldByName(targetFieldName).Interface(), mp)
-			targetField.Set(reflect.ValueOf(nestedObject))
-			continue
-		}
-
-		targetField.Set(sourceField.Convert(targetField.Type()))
+		return targetReflectedValue, nil
+	}
+	if srcReflectValue.Kind() == reflect.Map {
+		return reflect.Value{}, errors.New("unsupported type")
 	}
 
-	fmt.Println(targetObject)
+	sourceField := reflect.ValueOf(source)
 
-	if givenTargetType.Kind() == reflect.Ptr {
-		value := targetObject.Addr()
-		return value.Interface(), nil
-	}
+	return sourceField.Convert(targetType), nil
+}
 
-	return targetObject.Interface(), nil
+func createKey(sourceType, targetType string) string {
+	return sourceType + " | " + targetType
 }
